@@ -1,56 +1,95 @@
-import socket  # Importing the socket module to work with network connections
-import threading  # Importing the threading module to handle concurrent client connections
+import socket
+import threading
+import re
 
 # Define the proxy server address and port
-PROXY_HOST = 'localhost'  # Host address where the proxy server will listen (localhost for local testing)
-PROXY_PORT = 8080  # Port number where the proxy server will listen
+PROXY_HOST = 'localhost'
+PROXY_PORT = 8080
 
 # Function to handle client connections
 def handle_client(client_socket):
     """
-    This function handles incoming client connections. It receives the request from the client,
-    processes it (for now, it just prints the request), and sends a placeholder response back to the client.
+    Handles an incoming client request by forwarding it to the origin server,
+    retrieving the response, and sending it back to the client.
     """
-    # Receive the client's request (up to 4096 bytes) and decode it to a string
-    request = client_socket.recv(4096).decode()
-    print("Received request:\n", request)
-    
-    # Placeholder HTTP response. For now, it just sends back a simple 200 OK response with a short message
-    response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, Proxy!"
-    # Send the response to the client
-    client_socket.sendall(response.encode())
-    # Close the connection with the client
-    client_socket.close()
+    try:
+        # Receive request from the client
+        request = client_socket.recv(4096).decode()
+        print("Received request:\n", request)
+
+        # Extract the first line to get method and URL
+        request_lines = request.split('\r\n')
+        first_line = request_lines[0]
+        method, url, version = first_line.split()
+
+        # Validate HTTP version
+        if not url.startswith("http://") and not url.startswith("https://"):
+            print("Invalid URL format")
+            client_socket.sendall("HTTP/1.1 400 Bad Request\r\n\r\nInvalid URL format".encode())
+            client_socket.close()
+            return
+        
+        # Remove 'http://' or 'https://' if present and extract hostname and resource
+        url = re.sub(r'^http://|^https://', '', url)  # Remove 'http://' or 'https://'
+        host_end = url.find('/')
+        hostname = url[:host_end] if host_end != -1 else url
+        resource = url[host_end:] if host_end != -1 else '/'
+
+        print(f"Forwarding request to {hostname}{resource}")
+
+        # Connect to the origin server
+        origin_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        origin_socket.connect((hostname, 80))  # Assume HTTP port 80 for simplicity
+
+        # Forward the request to the origin server
+        origin_request = f"{method} {resource} {version}\r\n"
+        for line in request_lines[1:]:
+            origin_request += f"{line}\r\n"
+        origin_request += "\r\n"
+
+        origin_socket.sendall(origin_request.encode())
+
+        # Receive response from origin server
+        response = b""
+        while True:
+            part = origin_socket.recv(4096)
+            if not part:
+                break
+            response += part
+
+        # Send the response back to the client
+        client_socket.sendall(response)
+
+        # Close the sockets
+        origin_socket.close()
+        client_socket.close()
+
+    except Exception as e:
+        print(f"Error handling request: {e}")
+        client_socket.sendall("HTTP/1.1 500 Internal Server Error\r\n\r\nError handling request".encode())
+        client_socket.close()
 
 # Start the proxy server
 def start_proxy():
     """
-    This function sets up the proxy server. It creates a listening socket that waits for incoming connections.
-    When a connection is received, it handles the connection in a separate thread to allow multiple clients 
-    to be processed simultaneously.
+    Starts the proxy server to accept incoming client connections.
     """
-    # Create a TCP socket using IPv4 address family (AF_INET) and SOCK_STREAM type (TCP)
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
-    # Bind the socket to the specified host and port (localhost and port 8080)
-    server_socket.bind((PROXY_HOST, PROXY_PORT))
-    
-    # Start listening for incoming connections, with a maximum backlog of 5 (number of clients to queue)
-    server_socket.listen(5)
-    print(f"[*] Proxy Server listening on {PROXY_HOST}:{PROXY_PORT}")
-    
-    # Continuously accept incoming connections and handle them
-    while True:
-        # Accept a client connection
-        client_socket, addr = server_socket.accept()
-        # Print out the address of the client that connected
-        print(f"[*] Connection accepted from {addr}")
-        
-        # For each client connection, spawn a new thread to handle the client request independently
-        client_handler = threading.Thread(target=handle_client, args=(client_socket,))
-        client_handler.start()
+    try:
+        # Create server socket
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.bind((PROXY_HOST, PROXY_PORT))
+        server_socket.listen(5)
+        print(f"[*] Proxy Server listening on {PROXY_HOST}:{PROXY_PORT}")
 
-# Check if the script is being run directly (and not imported as a module)
+        while True:
+            # Accept incoming client connections
+            client_socket, addr = server_socket.accept()
+            print(f"[*] Connection accepted from {addr}")
+            client_handler = threading.Thread(target=handle_client, args=(client_socket,))
+            client_handler.start()
+
+    except Exception as e:
+        print(f"Error starting proxy server: {e}")
+
 if __name__ == "__main__":
-    # Start the proxy server by calling the start_proxy function
     start_proxy()
